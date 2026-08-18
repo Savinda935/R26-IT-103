@@ -2,7 +2,9 @@ import Constants from "expo-constants";
 
 
 const ENV_BACKEND_BASE_URL = process.env.EXPO_PUBLIC_BACKEND_BASE_URL;
-const DEFAULT_PC_BACKEND_BASE_URL = "http://10.68.28.18:8000";
+// Development fallback for the current PC network. Prefer
+// EXPO_PUBLIC_BACKEND_BASE_URL because this address can change between networks.
+const DEFAULT_PC_BACKEND_BASE_URL = "http://172.16.200.59:8000";
 
 const getExpoHostUrl = () => {
   const hostUri = Constants.expoConfig?.hostUri;

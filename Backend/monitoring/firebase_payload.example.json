@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "device_id": "device-001",
+  "plot_id": "plot-001",
+  "crop_cycle_id": "cycle-001",
+  "plant_id": null,
+  "recorded_at": 1786933800,
+  "calibration_version": "field-v1",
+  "source": "firebase",
+  "sensors": {
+    "air_temperature_c": 28.4,
+    "relative_humidity_percent": 74.2,
+    "heat_index_c": 30.1,
+    "soil_temperature_c": 26.8,
+    "soil_moisture_raw": 1640,
+    "soil_moisture_percent": 52.6,
+    "ec_ms_cm": 1.15
+  }
+}

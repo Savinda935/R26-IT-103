@@ -13,6 +13,7 @@ import { getRealtimeSensorSnapshot } from "../features/monitoring/iotMonitor";
 import { evaluateStage, getStages } from "../features/monitoring/stageLogic";
 import { getAiAlertSummary as getMockAiAlertSummary } from "../features/monitoring/aiAlerts";
 import { fetchAiAlertSummary } from "../services/aiService";
+import { fetchMonitoringStages } from "../features/monitoring/api/monitoringApi";
 import { appendLocalArray } from "../services/storage";
 
 const HISTORY_LIMIT = 60;
@@ -163,7 +164,10 @@ const ALERT_TITLE_TRANSLATIONS = {
   "Crop Growing Properly": "බෝගය හොඳින් වර්ධනය වේ",
   "Soil analog missing": "බිම් ආනලොග් අගය නොමැත",
   "Soil temperature missing": "බිම් උෂ්ණත්ව අගය නොමැත",
-  "EC sensor missing": "EC සංවේදක අගය නොමැත"
+  "EC sensor missing": "EC සංවේදක අගය නොමැත",
+  "Heat Stress Warning": "උෂ්ණත්ව ආතති අනතුරු",
+  "Optimal Air Temperature": "ප්‍රශස්ත වායු උෂ්ණත්වය",
+  "Slow Growth Risk": "මන්දගාමී වර්ධන අවදානම"
 };
 
 const ALERT_DETAIL_TRANSLATIONS = {
@@ -183,7 +187,10 @@ const ALERT_DETAIL_TRANSLATIONS = {
   "All parameters are within the optimal ranges.": "සියලු පරාමිතීන් ප්‍රමාණවත් පරාසයේ ඇත.",
   "Thresholds use analog scale. Check soil sensor mapping.": "සීමා ආනලොග් පරිමාණය භාවිත කරයි. බිම් සංවේදක සිතියම පරීක්ෂා කරන්න.",
   "Soil temp rules are not evaluated.": "බිම් උෂ්ණත්ව නීති ඇගයීමට නොගන්නා ලදී.",
-  "Nutrient alerts are not evaluated.": "පෝෂක අනතුරු ඇගයීමට නොගන්නා ලදී."
+  "Nutrient alerts are not evaluated.": "පෝෂක අනතුරු ඇගයීමට නොගන්නා ලදී.",
+  "Air temperature is above 35C. Crop heat stress risk is high.": "වායු උෂ්ණත්වය 35C ඉක්මවා ඇත. උෂ්ණත්ව ආතති අවදානම ඉහළයි.",
+  "Air temperature is in the 25-30C optimal growth range.": "වායු උෂ්ණත්වය 25-30C ප්‍රශස්ත පරාසයේ ඇත.",
+  "Air temperature is below 20C. Growth may slow down.": "වායු උෂ්ණත්වය 20Cට අඩුයි. වර්ධනය මන්දගාමී විය හැක."
 };
 
 const NOTE_TRANSLATIONS = {
@@ -211,7 +218,8 @@ const NOTE_TRANSLATIONS = {
   "Cool roots + warm air.": "සිසිල් මූල + උණුසුම් වායු.",
   "Low humidity aids color.": "අඩු ආර්ද්‍රතාව වර්ණ ගැන්වීමට උපකාරී.",
   "Warm days help ripening.": "උණුසුම් දින පළා වීමට උපකාරී.",
-  "Lower than vegetative.": "වර්ධන අදියරට වඩා අඩුයි."
+  "Lower than vegetative.": "වර්ධන අදියරට වඩා අඩුයි.",
+  "DHT22: 25-30C optimal, <20C slow growth, >35C heat stress.": "DHT22: 25-30C ප්‍රශස්ත, <20C මන්දගාමී වර්ධන, >35C උෂ්ණත්ව ආතතිය."
 };
 
 const formatValue = (value, unit) => {
@@ -554,8 +562,8 @@ const buildChartSvg = (title, unit, values, color) => {
 };
 
 export default function StageDashboardScreen() {
-  const stages = useMemo(() => getStages(), []);
-  const [stageId, setStageId] = useState(stages[1]?.id || stages[0].id);
+  const [stages, setStages] = useState(getStages());
+  const [stageId, setStageId] = useState(getStages()[1]?.id || getStages()[0].id);
   const [language, setLanguage] = useState("en");
   const [chartTab, setChartTab] = useState("trends");
   const [flags, setFlags] = useState({
@@ -568,6 +576,20 @@ export default function StageDashboardScreen() {
   const [history, setHistory] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchMonitoringStages()
+      .then((backendStages) => {
+        if (isMounted && backendStages.length) {
+          setStages(backendStages);
+        }
+      })
+      .catch((error) => console.warn("Using fallback stage profiles", error));
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     appendLocalArray("stageHistory", { stageId, timestamp: Date.now() }, 90).catch((error) => {
@@ -598,7 +620,7 @@ export default function StageDashboardScreen() {
     try {
       setIsDownloading(true);
       const now = new Date();
-      const stageSummaries = getStages().map((item) => evaluateStage(snapshot, item.id, {}));
+      const stageSummaries = stages.map((item) => evaluateStage(snapshot, item.id, {}, stages));
 
       const chartHtml = [
         buildChartSvg(t("airTemp"), "C", history.map((entry) => entry.airTemp), "#2F7D32"),
@@ -718,8 +740,13 @@ export default function StageDashboardScreen() {
           setHistory((prevHistory) => {
             const nextEntry = {
               soilAnalog: toNumber(data?.soil_analog),
-              soilMoisture: toNumber(data?.soil_moisture),
-              soilTemp: toNumber(data?.soil_temperature_c ?? data?.soil_temp_c),
+              soilMoisture: toNumber(
+                data?.soil_moisture ??
+                  data?.soilMoisture ??
+                  data?.soil_moisture_percent ??
+                  data?.soilMoisturePercent
+              ),
+              soilTemp: toNumber(data?.soil_temperature_c ?? data?.soil_temp_c ?? data?.ds18b20_temperature_c),
               airTemp: toNumber(data?.temperature_c),
               airHumidity: toNumber(data?.humidity),
               ec: toNumber(data?.ec),
@@ -745,7 +772,7 @@ export default function StageDashboardScreen() {
     };
   }, []);
 
-  const evaluation = useMemo(() => evaluateStage(snapshot, stageId, flags), [snapshot, stageId, flags]);
+  const evaluation = useMemo(() => evaluateStage(snapshot, stageId, flags, stages), [snapshot, stageId, flags, stages]);
   const { stage, readings, statuses, alerts } = evaluation;
   const stageTitle = getLocalized(STAGE_LABELS[stage.id], language);
   const stageDuration = getLocalized(STAGE_DURATIONS[stage.id], language);
@@ -753,12 +780,21 @@ export default function StageDashboardScreen() {
   const sensorCards = [
     {
       key: "soilAnalog",
-      title: t("soilAnalog"),
-      value: readings.soilAnalog,
-      unit: "",
+      title: stage.thresholds.soilMoisture?.unit === "%" ? t("soilMoisturePercent") : t("soilAnalog"),
+      value: stage.thresholds.soilMoisture?.unit === "%" ? readings.soilMoisturePercent : readings.soilAnalog,
+      unit: stage.thresholds.soilMoisture?.unit || "",
       range: stage.thresholds.soilMoisture,
       status: statuses.soilMoisture,
       statusLabel: statusLabelFor(statuses.soilMoisture)
+    },
+    {
+      key: "soilMoisturePercent",
+      title: t("soilMoisturePercent"),
+      value: readings.soilMoisturePercent,
+      unit: "%",
+      range: { min: 0, max: 100 },
+      status: "unknown",
+      statusLabel: t("statusUnknown")
     },
     {
       key: "soilTemp",
@@ -903,12 +939,20 @@ export default function StageDashboardScreen() {
       color: SENSOR_COLORS[0]
     },
     {
+      key: "soilMoisturePercent",
+      title: t("soilMoisturePercent"),
+      value: latestHistory.soilMoisture,
+      unit: "%",
+      range: { min: 0, max: 100 },
+      color: SENSOR_COLORS[1]
+    },
+    {
       key: "soilTemp",
       title: t("soilTemp"),
       value: latestHistory.soilTemp,
       unit: "C",
       range: stage.thresholds.soilTemp,
-      color: SENSOR_COLORS[1]
+      color: SENSOR_COLORS[2]
     },
     {
       key: "airTemp",
@@ -916,7 +960,7 @@ export default function StageDashboardScreen() {
       value: latestHistory.airTemp,
       unit: "C",
       range: stage.thresholds.airTemp,
-      color: SENSOR_COLORS[2]
+      color: SENSOR_COLORS[3]
     },
     {
       key: "airHumidity",
@@ -924,7 +968,7 @@ export default function StageDashboardScreen() {
       value: latestHistory.airHumidity,
       unit: "%",
       range: stage.thresholds.airHumidity,
-      color: SENSOR_COLORS[3]
+      color: SENSOR_COLORS[4] || SENSOR_COLORS[0]
     },
     {
       key: "ec",
@@ -932,7 +976,7 @@ export default function StageDashboardScreen() {
       value: latestHistory.ec,
       unit: "mS/cm",
       range: stage.thresholds.ec,
-      color: SENSOR_COLORS[4] || SENSOR_COLORS[0]
+      color: SENSOR_COLORS[0]
     }
   ];
 

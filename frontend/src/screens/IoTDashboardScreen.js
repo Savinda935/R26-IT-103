@@ -4,13 +4,14 @@ import SectionCard from "../components/ui/SectionCard";
 import StatTile from "../components/ui/StatTile";
 import ScreenHeader from "../components/ui/ScreenHeader";
 import { theme } from "../config/theme";
-import { getRealtimeSensorSnapshot } from "../features/monitoring/iotMonitor";
+import { getMonitoringDeviceStatuses, getRealtimeSensorSnapshot } from "../features/monitoring/iotMonitor";
 import { appendLocalArray, loadLocal } from "../services/storage";
 
 export default function IoTDashboardScreen() {
   const [snapshot, setSnapshot] = useState(null);
   const [history, setHistory] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [deviceStatus, setDeviceStatus] = useState(null);
 
   const toNumber = (value) => {
     const numeric = typeof value === "number" ? value : Number(value);
@@ -47,9 +48,13 @@ export default function IoTDashboardScreen() {
 
     const loadSnapshot = async () => {
       try {
-        const data = await getRealtimeSensorSnapshot();
+        const [data, statuses] = await Promise.all([
+          getRealtimeSensorSnapshot(),
+          getMonitoringDeviceStatuses()
+        ]);
         if (isMounted) {
           setSnapshot(data);
+          setDeviceStatus(statuses[0] || null);
           setHistory((prevHistory) => {
             const nextEntry = {
               humidity: toNumber(data?.humidity),
@@ -157,6 +162,30 @@ export default function IoTDashboardScreen() {
         title="Sensor dashboard"
         subtitle="Monitor soil and climate signals in real time."
       />
+
+      <SectionCard title="Device connection" subtitle="Backend heartbeat and five-minute storage status">
+        <View style={styles.grid}>
+          <View style={styles.gridItem}>
+            <StatTile
+              label="Device"
+              value={deviceStatus?.device_code || snapshot?.device_id || "--"}
+              hint={deviceStatus?.plot_id ? `Plot: ${deviceStatus.plot_id}` : "Waiting for setup"}
+            />
+          </View>
+          <View style={styles.gridItem}>
+            <StatTile
+              label="Connection"
+              value={(deviceStatus?.status || "unknown").toUpperCase()}
+              hint={
+                typeof deviceStatus?.seconds_since_seen === "number"
+                  ? `Last seen ${Math.round(deviceStatus.seconds_since_seen)} seconds ago`
+                  : "No reading received yet"
+              }
+              tone={deviceStatus?.status === "online" ? "accent" : "default"}
+            />
+          </View>
+        </View>
+      </SectionCard>
 
       <SectionCard title="Real-time sensors" subtitle="Wet-zone thresholds">
         <View style={styles.grid}>

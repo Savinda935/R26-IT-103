@@ -12,6 +12,9 @@ class Reading(BaseModel):
     soil_analog: Optional[float] = None
     soil_temperature_c: Optional[float] = None
     ec: Optional[float] = None
+    quality_status: Optional[str] = None
+    calibration_version: Optional[str] = None
+    source: Optional[str] = None
 
 
 class SummaryStats(BaseModel):
@@ -20,6 +23,39 @@ class SummaryStats(BaseModel):
     max: Dict[str, Optional[float]]
     trend: Dict[str, Optional[float]]
     count: int
+
+
+class SensorQualityResult(BaseModel):
+    status: str
+    issues: List[str] = Field(default_factory=list)
+    valid_field_count: int
+    total_field_count: int
+
+
+class ParameterWindowStats(BaseModel):
+    latest: Optional[float] = None
+    avg: Optional[float] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    trend_per_hour: Optional[float] = None
+    samples: int = 0
+    hours_low: float = 0
+    hours_high: float = 0
+    percent_in_range: Optional[float] = None
+    status: str = "unknown"
+    unit: str = ""
+
+
+class SensorWindowAnalysis(BaseModel):
+    stage_id: str
+    window_start: Optional[float] = None
+    window_end: Optional[float] = None
+    sample_count: int
+    valid_sample_percent: float
+    warning_score: int
+    warning_level: str
+    parameters: Dict[str, ParameterWindowStats]
+    contributing_factors: List[Dict[str, object]] = Field(default_factory=list)
 
 
 class StageEvaluationRequest(BaseModel):

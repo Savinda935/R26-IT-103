@@ -1,10 +1,12 @@
 import asyncio
 import io
 import json
+import math
 import os
 import sqlite3
 import time
 from datetime import datetime
+from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -21,6 +23,14 @@ from fastapi.responses import StreamingResponse
 from PIL import Image
 
 from .ai_model import predict_leaf_presence
+from .data_models import CanonicalSensorPayload, SensorValues
+from .data_service import (
+    build_default_setup,
+    canonical_to_reading,
+    init_phase1_db,
+    register_monitoring_setup,
+    store_five_minute_payload,
+)
 from .models import (
     AiAlertRequest,
     AiAlertResponse,
@@ -29,10 +39,13 @@ from .models import (
     GerminationAnalysisRequest,
     GerminationAnalysisResponse,
     Reading,
+    SensorQualityResult,
+    SensorWindowAnalysis,
     StageDecisionResponse,
     StageEvaluationResponse,
     SummaryStats
 )
+from .warning_service import init_warning_db, list_stages_from_db
 
 DB_PATH = os.environ.get("IOT_DB_PATH", "iot_readings.db")
 FIREBASE_URL = os.environ.get(
@@ -43,8 +56,41 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 FIREBASE_POLL_SECONDS = float(os.environ.get("FIREBASE_POLL_SECONDS", "30"))
+DEFAULT_DEVICE_ID = os.environ.get("MONITORING_DEVICE_ID", "device-001")
+DEFAULT_PLOT_ID = os.environ.get("MONITORING_PLOT_ID", "plot-001")
+DEFAULT_CROP_CYCLE_ID = os.environ.get("MONITORING_CROP_CYCLE_ID", "cycle-001")
+DEFAULT_PLANT_ID = os.environ.get("MONITORING_PLANT_ID")
+DEFAULT_PLANTING_DATE = os.environ.get("MONITORING_PLANTING_DATE", "2026-08-17")
 
 _poller_task: Optional[asyncio.Task] = None
+
+SENSOR_FIELDS = [
+    "humidity",
+    "temperature_c",
+    "heat_index_c",
+    "soil_moisture",
+    "soil_analog",
+    "soil_temperature_c",
+    "ec"
+]
+
+# Physical plausibility limits. Agronomic target ranges are stage-specific and
+# intentionally kept separate from these validation limits.
+SENSOR_VALID_RANGES = {
+    "humidity": (0.0, 100.0),
+    "temperature_c": (-10.0, 60.0),
+    "heat_index_c": (-10.0, 80.0),
+    "soil_moisture": (0.0, 100.0),
+    "soil_analog": (0.0, 4095.0),
+    "soil_temperature_c": (-10.0, 60.0),
+    "ec": (0.0, 20.0)
+}
+
+# DHT22 air-temperature rules (all stages):
+# - 25-30C optimal
+# - below 20C slow growth
+# - above 35C heat stress
+AIR_TEMP_THRESHOLD = {"min": 25, "max": 30, "unit": "C"}
 
 STAGES = [
     {
@@ -56,7 +102,7 @@ STAGES = [
             "soil_moisture": {"min": 1000, "max": 2000, "unit": "analog"},
             "soil_temp": {"min": 25, "max": 30, "unit": "C"},
             "air_humidity": {"min": 70, "max": 85, "unit": "%"},
-            "air_temp": {"min": 25, "max": 30, "unit": "C"},
+            "air_temp": dict(AIR_TEMP_THRESHOLD),
             "ec": {"min": 0.5, "max": 1.2, "unit": "mS/cm"}
         },
         "flags": ["slow_growth"]
@@ -70,7 +116,7 @@ STAGES = [
             "soil_moisture": {"min": 1200, "max": 2200, "unit": "analog"},
             "soil_temp": {"min": 22, "max": 28, "unit": "C"},
             "air_humidity": {"min": 60, "max": 75, "unit": "%"},
-            "air_temp": {"min": 22, "max": 28, "unit": "C"},
+            "air_temp": dict(AIR_TEMP_THRESHOLD),
             "ec": {"min": 0.8, "max": 1.5, "unit": "mS/cm"}
         },
         "flags": ["slow_growth"]
@@ -84,7 +130,7 @@ STAGES = [
             "soil_moisture": {"min": 1500, "max": 2500, "unit": "analog"},
             "soil_temp": {"min": 20, "max": 28, "unit": "C"},
             "air_humidity": {"min": 50, "max": 70, "unit": "%"},
-            "air_temp": {"min": 24, "max": 30, "unit": "C"},
+            "air_temp": dict(AIR_TEMP_THRESHOLD),
             "ec": {"min": 1.5, "max": 2.5, "unit": "mS/cm"}
         },
         "flags": ["slow_growth"]
@@ -98,7 +144,7 @@ STAGES = [
             "soil_moisture": {"min": 1200, "max": 2000, "unit": "analog"},
             "soil_temp": {"min": 20, "max": 26, "unit": "C"},
             "air_humidity": {"min": 50, "max": 65, "unit": "%"},
-            "air_temp": {"min": 21, "max": 29, "unit": "C"},
+            "air_temp": dict(AIR_TEMP_THRESHOLD),
             "ec": {"min": 1.5, "max": 2.2, "unit": "mS/cm"}
         },
         "flags": ["no_flower_development", "no_fruit_set"]
@@ -112,7 +158,7 @@ STAGES = [
             "soil_moisture": {"min": 1500, "max": 2500, "unit": "analog"},
             "soil_temp": {"min": 20, "max": 26, "unit": "C"},
             "air_humidity": {"min": 45, "max": 65, "unit": "%"},
-            "air_temp": {"min": 24, "max": 30, "unit": "C"},
+            "air_temp": dict(AIR_TEMP_THRESHOLD),
             "ec": {"min": 1.2, "max": 2.0, "unit": "mS/cm"}
         },
         "flags": ["slow_ripening"]
@@ -157,7 +203,12 @@ STAGE_LABEL_ALIASES = {
 
 
 def get_stage(stage_id: str) -> Dict[str, object]:
-    return next((stage for stage in STAGES if stage["id"] == stage_id), STAGES[0])
+    try:
+        stages = list_stages_from_db(DB_PATH)
+    except sqlite3.Error:
+        stages = []
+    source = stages or STAGES
+    return next((stage for stage in source if stage["id"] == stage_id), source[0])
 
 
 def normalize_stage_key(stage: Optional[str]) -> Optional[str]:
@@ -222,7 +273,43 @@ def classify_germination_window(plant_age_days: int, leaf_prediction: int) -> Ge
 
 
 def is_number(value: Optional[float]) -> bool:
-    return isinstance(value, (int, float)) and value is not None
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def validate_reading_quality(reading: Reading) -> SensorQualityResult:
+    issues: List[str] = []
+    valid_count = 0
+
+    for field in SENSOR_FIELDS:
+        value = getattr(reading, field)
+        if value is None:
+            continue
+        if not is_number(value):
+            issues.append(f"{field}:not_numeric")
+            continue
+
+        minimum, maximum = SENSOR_VALID_RANGES[field]
+        if value < minimum or value > maximum:
+            issues.append(f"{field}:out_of_physical_range")
+            continue
+        if field == "soil_analog" and value in {0, 4095}:
+            issues.append("soil_analog:adc_rail_value")
+            continue
+        valid_count += 1
+
+    if issues:
+        status = "suspect"
+    elif valid_count == 0:
+        status = "missing"
+    else:
+        status = "valid"
+
+    return SensorQualityResult(
+        status=status,
+        issues=issues,
+        valid_field_count=valid_count,
+        total_field_count=len(SENSOR_FIELDS)
+    )
 
 
 def range_status(value: Optional[float], range_def: Dict[str, float]) -> str:
@@ -308,12 +395,18 @@ def evaluate_stage_decision(
             recommendation = "Check soil moisture, temperature, and humidity sensors."
         elif moisture >= 70 and moisture <= 85 and temp >= 25 and temp <= 30 and humidity >= 70:
             status = "Healthy Germination"
+        elif is_number(temp) and temp > 35:
+            status = "Heat Stress"
+            recommendation = "Reduce heat stress. Use shade and improve ventilation."
+        elif is_number(temp) and temp < 20:
+            status = "Slow Growth"
+            recommendation = "Maintain warmer environment. Air temperature is below 20C."
         elif moisture < 70:
             status = "Dry Soil"
             recommendation = "Increase irrigation."
         elif temp < 25:
             status = "Low Temperature"
-            recommendation = "Maintain warmer environment."
+            recommendation = "Maintain warmer environment toward 25-30C."
         else:
             status = "Growth Delay"
 
@@ -321,8 +414,14 @@ def evaluate_stage_decision(
         if not has_values(moisture, temp, humidity):
             status = "Insufficient Data"
             recommendation = "Check soil moisture, temperature, and humidity sensors."
-        elif moisture >= 65 and moisture <= 75 and temp >= 24 and temp <= 30:
+        elif moisture >= 65 and moisture <= 75 and temp >= 25 and temp <= 30:
             status = "Healthy Seedling"
+        elif is_number(temp) and temp > 35:
+            status = "Heat Stress"
+            recommendation = "Reduce heat stress. Use shade and improve ventilation."
+        elif is_number(temp) and temp < 20:
+            status = "Slow Growth"
+            recommendation = "Maintain warmer environment. Air temperature is below 20C."
         elif humidity < 65:
             status = "Low Humidity"
             recommendation = "Increase humidity level."
@@ -336,8 +435,14 @@ def evaluate_stage_decision(
         if not has_values(moisture, temp, ec):
             status = "Insufficient Data"
             recommendation = "Check soil moisture, temperature, and EC sensors."
-        elif moisture >= 60 and moisture <= 70 and ec >= 1.5 and temp >= 24 and temp <= 32:
+        elif moisture >= 60 and moisture <= 70 and ec >= 1.5 and temp >= 25 and temp <= 30:
             status = "Healthy Vegetative Growth"
+        elif is_number(temp) and temp > 35:
+            status = "Heat Stress"
+            recommendation = "Reduce heat stress. Use shade and improve ventilation."
+        elif is_number(temp) and temp < 20:
+            status = "Slow Growth"
+            recommendation = "Maintain warmer environment. Air temperature is below 20C."
         elif ec < 1.5:
             status = "Low Nutrient Level"
             recommendation = "Apply nitrogen fertilizer."
@@ -351,8 +456,14 @@ def evaluate_stage_decision(
         if not has_values(temp, humidity):
             status = "Insufficient Data"
             recommendation = "Check temperature and humidity sensors."
-        elif temp >= 22 and temp <= 28 and humidity >= 60 and humidity <= 70:
+        elif temp >= 25 and temp <= 30 and humidity >= 60 and humidity <= 70:
             status = "Healthy Flowering"
+        elif is_number(temp) and temp > 35:
+            status = "Heat Stress"
+            recommendation = "Reduce heat stress. Use shade and improve ventilation."
+        elif is_number(temp) and temp < 20:
+            status = "Slow Growth"
+            recommendation = "Maintain warmer environment. Air temperature is below 20C."
         elif temp > 30:
             status = "Flower Drop Risk"
             recommendation = "Reduce heat stress."
@@ -366,8 +477,14 @@ def evaluate_stage_decision(
         if not has_values(moisture, temp, ec):
             status = "Insufficient Data"
             recommendation = "Check soil moisture, temperature, and EC sensors."
-        elif moisture >= 50 and moisture <= 65 and ec >= 2.0 and temp >= 20 and temp <= 30:
+        elif moisture >= 50 and moisture <= 65 and ec >= 2.0 and temp >= 25 and temp <= 30:
             status = "Healthy Fruiting"
+        elif is_number(temp) and temp > 35:
+            status = "Heat Stress"
+            recommendation = "Reduce heat stress. Use shade and improve ventilation."
+        elif is_number(temp) and temp < 20:
+            status = "Slow Growth"
+            recommendation = "Maintain warmer environment. Air temperature is below 20C."
         elif ec < 2.0:
             status = "Low Nutrient Supply"
             recommendation = "Apply potassium fertilizer."
@@ -397,8 +514,13 @@ def evaluate_stage_logic(stage_id: str, reading: Optional[Reading], flags: Dict[
     readings = normalize_reading(reading)
     thresholds = stage["thresholds"]
 
+    moisture_value = (
+        readings["soil_moisture"]
+        if thresholds["soil_moisture"].get("unit") == "%"
+        else readings["soil_analog"]
+    )
     statuses = {
-        "soil_moisture": range_status(readings["soil_analog"], thresholds["soil_moisture"]),
+        "soil_moisture": range_status(moisture_value, thresholds["soil_moisture"]),
         "soil_temp": range_status(readings["soil_temp"], thresholds["soil_temp"]),
         "air_humidity": range_status(readings["air_humidity"], thresholds["air_humidity"]),
         "air_temp": range_status(readings["air_temp"], thresholds["air_temp"]),
@@ -410,7 +532,15 @@ def evaluate_stage_logic(stage_id: str, reading: Optional[Reading], flags: Dict[
     def push_alert(level: str, title: str, detail: str) -> None:
         alerts.append({"level": level, "title": title, "detail": detail})
 
-    if is_number(readings["soil_analog"]) and readings["soil_analog"] < stage["dry_threshold"]:
+    if is_number(readings["air_temp"]):
+        if readings["air_temp"] > 35:
+            push_alert("warning", "Heat Stress Warning", "Air temperature is above 35C. Crop heat stress risk is high.")
+        elif 25 <= readings["air_temp"] <= 30:
+            push_alert("info", "Optimal Air Temperature", "Air temperature is in the 25-30C optimal growth range.")
+        elif readings["air_temp"] < 20:
+            push_alert("warning", "Slow Growth Risk", "Air temperature is below 20C. Growth may slow down.")
+
+    if is_number(moisture_value) and moisture_value < stage["dry_threshold"]:
         push_alert("alert", "Irrigation Required", "Soil moisture is below the dry-out threshold.")
 
     if stage["id"] == "stage1":
@@ -590,7 +720,7 @@ def call_gemini_ask(request: AiAskRequest) -> AiAskResponse:
 
 
 def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS readings (
@@ -602,14 +732,38 @@ def init_db() -> None:
                 soil_moisture REAL,
                 soil_analog REAL,
                 soil_temperature_c REAL,
-                ec REAL
+                ec REAL,
+                quality_status TEXT,
+                calibration_version TEXT,
+                source TEXT
             )
             """
         )
+        existing_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(readings)").fetchall()
+        }
+        for column_name, column_type in (
+            ("quality_status", "TEXT"),
+            ("calibration_version", "TEXT"),
+            ("source", "TEXT")
+        ):
+            if column_name not in existing_columns:
+                connection.execute(f"ALTER TABLE readings ADD COLUMN {column_name} {column_type}")
         connection.commit()
+    init_phase1_db(DB_PATH)
+    register_monitoring_setup(
+        DB_PATH,
+        build_default_setup(
+            plot_id=DEFAULT_PLOT_ID,
+            crop_cycle_id=DEFAULT_CROP_CYCLE_ID,
+            device_id=DEFAULT_DEVICE_ID,
+            planting_date=DEFAULT_PLANTING_DATE,
+        ),
+    )
+    init_warning_db(DB_PATH, STAGES)
 
 
-def row_to_dict(row: sqlite3.Row) -> Dict[str, Optional[float]]:
+def row_to_dict(row: sqlite3.Row) -> Dict[str, object]:
     return {
         "timestamp": row["timestamp"],
         "humidity": row["humidity"],
@@ -618,7 +772,18 @@ def row_to_dict(row: sqlite3.Row) -> Dict[str, Optional[float]]:
         "soil_moisture": row["soil_moisture"],
         "soil_analog": row["soil_analog"],
         "soil_temperature_c": row["soil_temperature_c"],
-        "ec": row["ec"]
+        "ec": row["ec"],
+        "quality_status": row["quality_status"],
+        "calibration_version": row["calibration_version"],
+        "source": row["source"],
+        "device_id": row["device_id"],
+        "plot_id": row["plot_id"],
+        "crop_cycle_id": row["crop_cycle_id"],
+        "plant_id": row["plant_id"],
+        "bucket_start": row["bucket_start"],
+        "received_at": row["received_at"],
+        "quality_issues": json.loads(row["quality_issues"] or "[]"),
+        "schema_version": row["schema_version"]
     }
 
 
@@ -631,7 +796,10 @@ def reading_to_dict(reading: Reading, timestamp: Optional[float] = None) -> Dict
         "soil_moisture": reading.soil_moisture,
         "soil_analog": reading.soil_analog,
         "soil_temperature_c": reading.soil_temperature_c,
-        "ec": reading.ec
+        "ec": reading.ec,
+        "quality_status": reading.quality_status,
+        "calibration_version": reading.calibration_version,
+        "source": reading.source
     }
 
 
@@ -660,7 +828,9 @@ def parse_firebase_history_items(payload: Dict[str, object]) -> List[Dict[str, o
                     try:
                         entry["timestamp"] = float(key)
                     except (TypeError, ValueError):
-                        pass
+                        decoded_timestamp = decode_firebase_push_timestamp(str(key))
+                        if decoded_timestamp is not None:
+                            entry["timestamp"] = decoded_timestamp
                 items.append(entry)
 
             if items:
@@ -669,10 +839,27 @@ def parse_firebase_history_items(payload: Dict[str, object]) -> List[Dict[str, o
     return []
 
 
+FIREBASE_PUSH_ALPHABET = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+
+
+def decode_firebase_push_timestamp(push_id: str) -> Optional[float]:
+    if len(push_id) < 8:
+        return None
+    timestamp_ms = 0
+    for character in push_id[:8]:
+        index = FIREBASE_PUSH_ALPHABET.find(character)
+        if index < 0:
+            return None
+        timestamp_ms = timestamp_ms * 64 + index
+    return timestamp_ms / 1000.0
+
+
 def insert_reading(reading: Reading) -> float:
     timestamp = reading.timestamp or time.time()
+    quality = validate_reading_quality(reading)
+    quality_status = reading.quality_status or quality.status
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         connection.execute(
             """
             INSERT INTO readings (
@@ -683,8 +870,11 @@ def insert_reading(reading: Reading) -> float:
                 soil_moisture,
                 soil_analog,
                 soil_temperature_c,
-                ec
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ec,
+                quality_status,
+                calibration_version,
+                source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp,
@@ -694,7 +884,10 @@ def insert_reading(reading: Reading) -> float:
                 reading.soil_moisture,
                 reading.soil_analog,
                 reading.soil_temperature_c,
-                reading.ec
+                reading.ec,
+                quality_status,
+                reading.calibration_version,
+                reading.source
             )
         )
         connection.commit()
@@ -703,9 +896,11 @@ def insert_reading(reading: Reading) -> float:
 
 
 def ingest_firebase_reading() -> float:
-    reading = fetch_firebase_reading()
-    timestamp = insert_reading(reading)
-    return timestamp
+    payload = fetch_firebase_payload()
+    reading = canonical_to_reading(payload)
+    quality = validate_reading_quality(reading)
+    result = store_five_minute_payload(DB_PATH, payload, quality.status, quality.issues)
+    return result.recorded_at
 
 
 async def firebase_poll_loop() -> None:
@@ -735,8 +930,8 @@ def stop_firebase_poller() -> None:
         _poller_task.cancel()
 
 
-def fetch_readings(limit: int, since: Optional[float] = None) -> List[Dict[str, Optional[float]]]:
-    with sqlite3.connect(DB_PATH) as connection:
+def fetch_readings(limit: int, since: Optional[float] = None) -> List[Dict[str, object]]:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         connection.row_factory = sqlite3.Row
         if since is not None:
             rows = connection.execute(
@@ -752,8 +947,8 @@ def fetch_readings(limit: int, since: Optional[float] = None) -> List[Dict[str, 
     return [row_to_dict(row) for row in rows]
 
 
-def fetch_readings_chrono(limit: int, since: Optional[float] = None) -> List[Dict[str, Optional[float]]]:
-    with sqlite3.connect(DB_PATH) as connection:
+def fetch_readings_chrono(limit: int, since: Optional[float] = None) -> List[Dict[str, object]]:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         connection.row_factory = sqlite3.Row
         if since is not None:
             rows = connection.execute(
@@ -846,7 +1041,170 @@ def compute_summary(rows: List[Dict[str, Optional[float]]]) -> SummaryStats:
     return SummaryStats(avg=avg, min=min_values, max=max_values, trend=trend, count=len(rows))
 
 
+def _warning_level(score: int) -> str:
+    if score >= 75:
+        return "red"
+    if score >= 50:
+        return "orange"
+    if score >= 25:
+        return "yellow"
+    return "green"
+
+
+def analyze_sensor_window(
+    rows: List[Dict[str, object]],
+    stage_id: str
+) -> SensorWindowAnalysis:
+    stage = get_stage(stage_id)
+    ordered = sorted(
+        [row for row in rows if is_number(row.get("timestamp"))],
+        key=lambda row: row["timestamp"]
+    )
+    mapping = {
+        "soil_moisture": ("soil_analog", stage["thresholds"]["soil_moisture"], 15),
+        "soil_temperature": ("soil_temperature_c", stage["thresholds"]["soil_temp"], 8),
+        "air_temperature": ("temperature_c", stage["thresholds"]["air_temp"], 10),
+        "humidity": ("humidity", stage["thresholds"]["air_humidity"], 7),
+        "ec": ("ec", stage["thresholds"]["ec"], 10)
+    }
+
+    parameters: Dict[str, object] = {}
+    contributing_factors: List[Dict[str, object]] = []
+    warning_score = 0.0
+
+    for output_name, (field, target, weight) in mapping.items():
+        samples = [row for row in ordered if is_number(row.get(field))]
+        values = [float(row[field]) for row in samples]
+        hours_low = 0.0
+        hours_high = 0.0
+
+        for index in range(len(samples) - 1):
+            duration_hours = max(0.0, min(1.0, (samples[index + 1]["timestamp"] - samples[index]["timestamp"]) / 3600.0))
+            value = float(samples[index][field])
+            if value < target["min"]:
+                hours_low += duration_hours
+            elif value > target["max"]:
+                hours_high += duration_hours
+
+        in_range_count = sum(target["min"] <= value <= target["max"] for value in values)
+        percent_in_range = (in_range_count / len(values) * 100.0) if values else None
+        latest = values[-1] if values else None
+        if latest is None:
+            status = "unknown"
+        elif latest < target["min"]:
+            status = "low"
+        elif latest > target["max"]:
+            status = "high"
+        else:
+            status = "ok"
+
+        trend_per_hour = None
+        if len(samples) >= 2:
+            elapsed_hours = (samples[-1]["timestamp"] - samples[0]["timestamp"]) / 3600.0
+            if elapsed_hours > 0:
+                trend_per_hour = (values[-1] - values[0]) / elapsed_hours
+
+        abnormal_fraction = 0.0 if percent_in_range is None else 1.0 - percent_in_range / 100.0
+        persistence_bonus = 10.0 if abnormal_fraction >= 0.5 and (hours_low >= 0.5 or hours_high >= 0.5) else 0.0
+        parameter_score = weight * abnormal_fraction + persistence_bonus
+        warning_score += parameter_score
+        if status in {"low", "high"} or abnormal_fraction >= 0.25:
+            contributing_factors.append({
+                "factor": output_name,
+                "status": status if status != "ok" else "intermittent",
+                "hours_low": round(hours_low, 2),
+                "hours_high": round(hours_high, 2),
+                "percent_in_range": round(percent_in_range or 0.0, 1),
+                "risk_points": round(parameter_score, 1)
+            })
+
+        parameters[output_name] = {
+            "latest": latest,
+            "avg": sum(values) / len(values) if values else None,
+            "min": min(values) if values else None,
+            "max": max(values) if values else None,
+            "trend_per_hour": trend_per_hour,
+            "samples": len(values),
+            "hours_low": round(hours_low, 2),
+            "hours_high": round(hours_high, 2),
+            "percent_in_range": round(percent_in_range, 1) if percent_in_range is not None else None,
+            "status": status,
+            "unit": target["unit"]
+        }
+
+    valid_rows = sum(
+        1 for row in ordered
+        if row.get("quality_status") in (None, "valid")
+    )
+    valid_percent = valid_rows / len(ordered) * 100.0 if ordered else 0.0
+    if ordered and valid_percent < 75:
+        warning_score += 10
+        contributing_factors.append({
+            "factor": "data_quality",
+            "status": "suspect",
+            "valid_sample_percent": round(valid_percent, 1),
+            "risk_points": 10
+        })
+
+    score = int(round(min(100.0, warning_score)))
+    contributing_factors.sort(key=lambda item: float(item.get("risk_points", 0)), reverse=True)
+    return SensorWindowAnalysis(
+        stage_id=stage["id"],
+        window_start=ordered[0]["timestamp"] if ordered else None,
+        window_end=ordered[-1]["timestamp"] if ordered else None,
+        sample_count=len(ordered),
+        valid_sample_percent=round(valid_percent, 1),
+        warning_score=score,
+        warning_level=_warning_level(score),
+        parameters=parameters,
+        contributing_factors=contributing_factors
+    )
+
+
+def _pick_first_optional_float(payload: Dict[str, object], keys: List[str]) -> Optional[float]:
+    for key in keys:
+        if key not in payload:
+            continue
+
+        value = payload[key]
+        if value is None:
+            continue
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+SOIL_MOISTURE_FIREBASE_KEYS = [
+    "soil_moisture",
+    "soilMoisture",
+    "soil_moisture_percent",
+    "soilMoisturePercent",
+]
+
+
+SOIL_TEMP_FIREBASE_KEYS = [
+    "soil_temperature_c",
+    "soil_temp_c",
+    "ds18b20_temperature_c",
+]
+
+
+AIR_TEMP_FIREBASE_KEYS = [
+    "air_temperature_c",
+    "dht_temperature_c",
+    "temperature_c",
+]
+
+
 def fetch_firebase_reading() -> Reading:
+    return canonical_to_reading(fetch_firebase_payload())
+
+
+def fetch_firebase_payload() -> CanonicalSensorPayload:
     try:
         response = httpx.get(f"{FIREBASE_URL}/.json", timeout=10)
         response.raise_for_status()
@@ -854,15 +1212,33 @@ def fetch_firebase_reading() -> Reading:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
     payload = response.json() or {}
+    if all(key in payload for key in ("device_id", "plot_id", "crop_cycle_id", "sensors")):
+        canonical_payload = dict(payload)
+        if "recorded_at" not in canonical_payload and "timestamp" in canonical_payload:
+            canonical_payload["recorded_at"] = canonical_payload["timestamp"]
+        return CanonicalSensorPayload(**canonical_payload)
+
     sensors = payload.get("sensors", payload)
-    return Reading(
-        humidity=sensors.get("humidity"),
-        temperature_c=sensors.get("temperature_c"),
-        heat_index_c=sensors.get("heat_index_c"),
-        soil_moisture=sensors.get("soil_moisture"),
-        soil_analog=sensors.get("soil_analog"),
-        soil_temperature_c=sensors.get("soil_temperature_c") or sensors.get("soil_temp_c"),
-        ec=sensors.get("ec")
+    soil_temperature_c = _pick_first_optional_float(sensors, SOIL_TEMP_FIREBASE_KEYS)
+    soil_moisture = _pick_first_optional_float(sensors, SOIL_MOISTURE_FIREBASE_KEYS)
+
+    return CanonicalSensorPayload(
+        device_id=DEFAULT_DEVICE_ID,
+        plot_id=DEFAULT_PLOT_ID,
+        crop_cycle_id=DEFAULT_CROP_CYCLE_ID,
+        plant_id=DEFAULT_PLANT_ID,
+        recorded_at=_pick_first_optional_float(payload, ["recorded_at", "timestamp"]),
+        sensors=SensorValues(
+            air_temperature_c=_pick_first_optional_float(sensors, AIR_TEMP_FIREBASE_KEYS),
+            relative_humidity_percent=_pick_first_optional_float(sensors, ["relative_humidity_percent", "humidity"]),
+            heat_index_c=_pick_first_optional_float(sensors, ["heat_index_c"]),
+            soil_temperature_c=soil_temperature_c,
+            soil_moisture_raw=_pick_first_optional_float(sensors, ["soil_moisture_raw", "soil_analog"]),
+            soil_moisture_percent=soil_moisture,
+            ec_ms_cm=_pick_first_optional_float(sensors, ["ec_ms_cm", "ec"]),
+        ),
+        calibration_version=payload.get("calibration_version"),
+        source="firebase",
     )
 
 
@@ -882,7 +1258,22 @@ def fetch_firebase_history(
     rows: List[Dict[str, Optional[float]]] = []
 
     for item in items:
-        reading = Reading(**item)
+        normalized_item = dict(item)
+
+        air_temp = _pick_first_optional_float(normalized_item, AIR_TEMP_FIREBASE_KEYS)
+        if air_temp is not None:
+            normalized_item["temperature_c"] = air_temp
+
+        soil_temp = _pick_first_optional_float(normalized_item, SOIL_TEMP_FIREBASE_KEYS)
+        if soil_temp is not None:
+            normalized_item["soil_temperature_c"] = soil_temp
+
+        soil_m_pct = _pick_first_optional_float(normalized_item, SOIL_MOISTURE_FIREBASE_KEYS)
+        if soil_m_pct is not None:
+            normalized_item["soil_moisture"] = soil_m_pct
+
+        reading = Reading(**normalized_item)
+        reading.source = reading.source or "firebase"
         timestamp = item.get("timestamp") if isinstance(item, dict) else None
         row = reading_to_dict(reading, timestamp=timestamp)
 

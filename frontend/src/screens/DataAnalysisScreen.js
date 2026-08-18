@@ -8,11 +8,12 @@ import SectionCard from "../components/ui/SectionCard";
 import StatTile from "../components/ui/StatTile";
 import PrimaryButton from "../components/ui/PrimaryButton";
 import { theme } from "../config/theme";
-import { BACKEND_BASE_URL, WET_ZONE_LIMITS } from "../config/constants";
+import { WET_ZONE_LIMITS } from "../config/constants";
+import { API_BASE_URL } from "../config/api";
 
-const SUMMARY_ENDPOINT = "/analytics/summary/firebase";
-const HISTORY_ENDPOINT = "/analytics/history/firebase";
-const REPORT_ENDPOINT = "/report/firebase/pdf";
+const SUMMARY_ENDPOINT = "/api/monitoring/analytics/summary?minutes=10080";
+const HISTORY_ENDPOINT = "/api/monitoring/readings";
+const REPORT_ENDPOINT = "/api/monitoring/report/pdf?minutes=10080&limit=2000";
 
 const TEXT = {
   en: {
@@ -318,8 +319,8 @@ export default function DataAnalysisScreen() {
   const t = useCallback((key) => TEXT[language][key] || TEXT.en[key] || key, [language]);
 
   const loadSummary = useCallback(async () => {
-    const url = `${BACKEND_BASE_URL}${SUMMARY_ENDPOINT}`;
-    const historyUrl = `${BACKEND_BASE_URL}${HISTORY_ENDPOINT}?limit=120&chronological=true`;
+    const url = `${API_BASE_URL}${SUMMARY_ENDPOINT}`;
+    const historyUrl = `${API_BASE_URL}${HISTORY_ENDPOINT}?limit=120&chronological=true`;
     try {
       setLoading(true);
       const [response, historyResponse] = await Promise.all([fetch(url), fetch(historyUrl)]);
@@ -352,7 +353,7 @@ export default function DataAnalysisScreen() {
   const handleOpenReport = async () => {
     try {
       setDownloadingReport(true);
-      const url = `${BACKEND_BASE_URL}${REPORT_ENDPOINT}`;
+      const url = `${API_BASE_URL}${REPORT_ENDPOINT}`;
       const filename = `naimiris-firebase-report-${new Date().toISOString().slice(0, 10)}.pdf`;
       const localUri = `${FileSystem.documentDirectory}${filename}`;
       const result = await FileSystem.downloadAsync(url, localUri);

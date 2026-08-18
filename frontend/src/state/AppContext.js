@@ -5,6 +5,12 @@ const initialState = {
   land: null,
   sensors: {},
   growthStage: null,
+  monitoringContext: {
+    plotId: "plot-001",
+    cropCycleId: "cycle-001",
+    deviceId: "device-001",
+    plantId: null
+  },
   pestSeverity: null,
   activePlanId: "basic"
 };
@@ -19,6 +25,8 @@ function reducer(state, action) {
       return { ...state, sensors: action.payload };
     case "SET_GROWTH_STAGE":
       return { ...state, growthStage: action.payload };
+    case "SET_MONITORING_CONTEXT":
+      return { ...state, monitoringContext: { ...state.monitoringContext, ...action.payload } };
     case "SET_PEST_SEVERITY":
       return { ...state, pestSeverity: action.payload };
     case "SET_PLAN":
