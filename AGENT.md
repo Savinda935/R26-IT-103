@@ -554,6 +554,7 @@ Keep Savinda's monitoring frontend and Krishan's pre-analysis frontend unchanged
 
 ## 12. Monitoring Phase Update and Progress
 
+
 The Phase 1 monitoring software foundation is implemented. Completed and pending work is tracked below.
 
 ### Phase 1 software — completed
@@ -600,6 +601,30 @@ Phase 2 endpoints:
 - `GET /api/monitoring/warnings`
 - `POST /api/monitoring/warnings/{event_id}/acknowledge`
 - `POST /api/monitoring/warnings/{event_id}/resolve`
+
+### Phase 3 growth dataset and model — in progress
+
+- [x] Define four observable whole-plant classes: seedling, vegetative, reproductive, and maturity.
+- [x] Document a standardized weekly photography protocol.
+- [x] Define the label manifest, including plant identity, age, flower/fruit indicators, labeler, and verifier.
+- [x] Implement deterministic train/validation/test splitting by plant ID to prevent leakage.
+- [x] Implement a MobileNetV2 transfer-learning baseline.
+- [x] Implement upper-layer fine-tuning and best-validation-checkpoint selection.
+- [x] Export confusion matrix, accuracy, macro F1, and per-class precision/recall/F1.
+- [x] Export the selected Keras model with class, version, split, dataset-hash, and metric metadata.
+- [x] Add accepted/provisional/rejected confidence handling to backend inference.
+- [x] Keep leaf presence as a separate germination sub-analysis.
+- [x] Add `POST /api/monitoring/analytics/growth-stage/analyze`.
+- [ ] Collect and verify at least 150–200 real images per class from at least 30–50 plants.
+- [ ] Train and fine-tune the model on the collected dataset.
+- [ ] Evaluate the untouched plant-separated test set and target macro F1 of at least 0.75.
+- [ ] Review confidence thresholds against validation results before field use.
+
+Phase 3 resources:
+
+- Training pipeline: `Backend/training/growth_stage/train.py`
+- Photography and training guide: `Backend/training/growth_stage/README.md`
+- Manifest template: `Backend/training/growth_stage/dataset_manifest.example.csv`
 
 ### Current Firebase/API status
 

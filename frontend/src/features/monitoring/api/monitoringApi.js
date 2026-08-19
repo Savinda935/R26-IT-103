@@ -30,6 +30,25 @@ export async function analyzeGerminationImage({ imageAsset, plantAgeDays }) {
   return response.data;
 }
 
+export async function analyzeGrowthStageImage({ imageAsset }) {
+  const formData = new FormData();
+  const filename = imageAsset.fileName || `growth-stage-${Date.now()}.jpg`;
+  const mimeType = imageAsset.mimeType || "image/jpeg";
+
+  formData.append("image", {
+    uri: imageAsset.uri,
+    name: filename,
+    type: mimeType
+  });
+
+  const response = await axios.post(
+    `${API_BASE_URL}${MONITORING_PREFIX}/analytics/growth-stage/analyze`,
+    formData,
+    { headers: { "Content-Type": "multipart/form-data" } }
+  );
+  return response.data;
+}
+
 export async function fetchAiAlertSummary(payload) {
   const response = await axios.post(`${API_BASE_URL}${MONITORING_PREFIX}/ai/alerts`, payload);
   return response.data;

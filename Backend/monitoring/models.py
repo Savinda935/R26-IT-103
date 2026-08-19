@@ -95,6 +95,20 @@ class GerminationAnalysisResponse(BaseModel):
     recommendation: str
 
 
+class GrowthStagePredictionResponse(BaseModel):
+    predicted_stage: Optional[str] = None
+    confidence: float = Field(..., ge=0, le=1)
+    decision: str
+    accepted: bool
+    requires_confirmation: bool
+    message: str
+    model_name: str
+    model_version: str
+    classes: List[str]
+    probabilities: Dict[str, float]
+    leaf_prediction: int = Field(..., ge=0, le=1)
+
+
 class StageDecisionResponse(BaseModel):
     stage: Optional[str]
     status: str

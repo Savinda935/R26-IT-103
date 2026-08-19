@@ -1,27 +1,18 @@
-import React, { useMemo, useState } from "react";
-import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useState } from "react";
+import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import SectionCard from "../components/ui/SectionCard";
 import PrimaryButton from "../components/ui/PrimaryButton";
 import ScreenHeader from "../components/ui/ScreenHeader";
 import StatTile from "../components/ui/StatTile";
 import { theme } from "../config/theme";
-import { analyzeGerminationImage } from "../features/monitoring/api/monitoringApi";
+import { analyzeGrowthStageImage } from "../features/monitoring/api/monitoringApi";
 
 export default function GrowthMonitoringScreen() {
   const [selectedImage, setSelectedImage] = useState(null);
-  const [plantAgeDays, setPlantAgeDays] = useState("7");
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-
-  const safeAge = useMemo(() => {
-    const value = Number(plantAgeDays);
-    if (!Number.isFinite(value)) {
-      return null;
-    }
-    return Math.max(1, Math.min(21, Math.round(value)));
-  }, [plantAgeDays]);
 
   const pickImage = async () => {
     setErrorMessage("");
@@ -51,18 +42,10 @@ export default function GrowthMonitoringScreen() {
       return;
     }
 
-    if (!safeAge) {
-      setErrorMessage("Enter plant age between 1 and 21 days.");
-      return;
-    }
-
     setIsLoading(true);
     setErrorMessage("");
     try {
-      const response = await analyzeGerminationImage({
-        imageAsset: selectedImage,
-        plantAgeDays: safeAge
-      });
+      const response = await analyzeGrowthStageImage({ imageAsset: selectedImage });
       setResult(response);
     } catch (error) {
       const detail = error?.response?.data?.detail;
@@ -90,16 +73,6 @@ export default function GrowthMonitoringScreen() {
           </View>
         )}
 
-        <Text style={styles.label}>Plant age (days, 1-21)</Text>
-        <TextInput
-          style={styles.input}
-          value={plantAgeDays}
-          onChangeText={setPlantAgeDays}
-          keyboardType="number-pad"
-          placeholder="e.g. 7"
-          placeholderTextColor={theme.colors.muted}
-        />
-
         <View style={styles.buttonRow}>
           <View style={styles.buttonCell}>
             <PrimaryButton label="Pick image" variant="outline" onPress={pickImage} disabled={isLoading} />
@@ -112,7 +85,7 @@ export default function GrowthMonitoringScreen() {
         {isLoading ? (
           <View style={styles.loadingRow}>
             <ActivityIndicator color={theme.colors.primary} />
-            <Text style={styles.loadingText}>Running germination model on backend...</Text>
+            <Text style={styles.loadingText}>Classifying the whole-plant growth stage...</Text>
           </View>
         ) : null}
 
@@ -122,21 +95,21 @@ export default function GrowthMonitoringScreen() {
       <SectionCard title="Stage guidance" subtitle="Localized for Sri Lankan wet zone">
         <View style={styles.grid}>
           <View style={styles.gridItem}>
-            <StatTile label="Current Stage" value={result?.stage_label || "--"} tone="accent" />
+            <StatTile label="Observed Stage" value={result?.predicted_stage || "Uncertain"} tone="accent" />
           </View>
           <View style={styles.gridItem}>
-            <StatTile label="Window" value={result?.stage_window || "--"} hint="Cycle target" />
+            <StatTile label="Confidence" value={result ? `${Math.round(result.confidence * 100)}%` : "--"} hint={result?.model_version || "Model version"} />
           </View>
         </View>
         <View style={styles.grid}>
           <View style={styles.gridItem}>
-            <StatTile label="Status" value={result?.status || "--"} />
+            <StatTile label="Decision" value={result?.decision || "--"} />
           </View>
           <View style={styles.gridItem}>
-            <StatTile label="Leaf Status" value={result?.leaf_status || "--"} />
+            <StatTile label="Leaf Check" value={result ? (result.leaf_prediction ? "Detected" : "Not detected") : "--"} />
           </View>
         </View>
-        <Text style={styles.text}>Recommendation: {result?.recommendation || "Upload a weekly image to get guidance."}</Text>
+        <Text style={styles.text}>Result: {result?.message || "Upload a standardized weekly whole-plant image."}</Text>
       </SectionCard>
     </ScrollView>
   );
@@ -163,23 +136,6 @@ const styles = StyleSheet.create({
   },
   emptyPreviewText: {
     color: theme.colors.muted,
-    fontFamily: theme.typography.body
-  },
-  label: {
-    color: theme.colors.muted,
-    marginBottom: theme.spacing.xs,
-    fontFamily: theme.typography.medium,
-    fontSize: 12
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: theme.colors.borderStrong,
-    backgroundColor: theme.colors.surfaceAlt,
-    color: theme.colors.text,
-    borderRadius: theme.radius.sm,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: theme.spacing.sm,
-    marginBottom: theme.spacing.md,
     fontFamily: theme.typography.body
   },
   buttonRow: {

@@ -7,6 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from . import service as monitoring_service
+from .ai_model import predict_growth_stage
 from .data_models import (
     AggregationResponse,
     CanonicalSensorPayload,
@@ -39,6 +40,7 @@ from .models import (
     AiAskResponse,
     GerminationAnalysisRequest,
     GerminationAnalysisResponse,
+    GrowthStagePredictionResponse,
     Reading,
     SensorQualityResult,
     SensorWindowAnalysis,
@@ -315,6 +317,31 @@ def germination_image_analysis(
         return analyze_germination_image(plant_age_days, temp_path)
     except (FileNotFoundError, RuntimeError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    finally:
+        image.file.close()
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+
+
+@router.post("/analytics/growth-stage/analyze", response_model=GrowthStagePredictionResponse)
+def growth_stage_image_analysis(
+    image: UploadFile = File(...)
+) -> GrowthStagePredictionResponse:
+    """Classify a standardized whole-plant image using the trained Phase 3 model."""
+    if image.content_type and not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+
+    suffix = Path(image.filename or "").suffix or ".jpg"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_path = temp_file.name
+            temp_file.write(image.file.read())
+        return GrowthStagePredictionResponse(**predict_growth_stage(temp_path))
+    except (FileNotFoundError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=f"Invalid image or model output: {error}") from error
     finally:
         image.file.close()
         if temp_path:

@@ -25,6 +25,8 @@ ENV/
 # Runtime/generated project folders
 uploads/
 ml_models/
+artifacts/
+datasets/
 
 # Large ML model artifacts
 *.keras

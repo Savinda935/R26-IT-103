@@ -1,0 +1,5 @@
+image_path,plant_id,capture_date,plant_age_days,stage_label,flower_present,fruit_present,labelled_by,verified_by,notes
+images/P001_2026-08-01.jpg,P001,2026-08-01,5,seedling,false,false,labeler_name,reviewer_name,Cotyledons and first true leaves visible
+images/P002_2026-08-25.jpg,P002,2026-08-25,24,vegetative,false,false,labeler_name,reviewer_name,Branching canopy with no flowers
+images/P003_2026-09-15.jpg,P003,2026-09-15,50,reproductive,true,true,labeler_name,reviewer_name,Flowers and green fruit visible
+images/P004_2026-11-10.jpg,P004,2026-11-10,105,maturity,false,true,labeler_name,reviewer_name,Fruit color change and harvest readiness visible
