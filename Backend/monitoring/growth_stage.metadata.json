@@ -1,0 +1,90 @@
+{
+  "model_name": "mobilenetv2_growth_stage",
+  "version": "v1-20260819-custom",
+  "classes": [
+    "seedling",
+    "vegetative",
+    "reproductive",
+    "maturity"
+  ],
+  "image_size": [
+    224,
+    224
+  ],
+  "accept_threshold": 0.75,
+  "provisional_threshold": 0.5,
+  "trained_at": "2026-08-19T09:17:09.200151+00:00",
+  "manifest_sha256": "77967a41e34728ebce8988f25c66ad9e13586a2071b71d231711590dc8323240",
+  "split_seed": 20260819,
+  "split_by": "plant_id",
+  "split_counts": {
+    "train": 4044,
+    "validation": 853,
+    "test": 850
+  },
+  "class_counts": {
+    "seedling": 1719,
+    "vegetative": 734,
+    "reproductive": 3269,
+    "maturity": 25
+  },
+  "metrics": {
+    "test_size": 850,
+    "accuracy": 0.9988235294117647,
+    "macro_f1": 0.9640124902419984,
+    "mean_confidence": 0.9959128717113944,
+    "confusion_matrix": [
+      [
+        264,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        125,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        457,
+        1
+      ],
+      [
+        0,
+        0,
+        0,
+        3
+      ]
+    ],
+    "per_class": {
+      "seedling": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 264
+      },
+      "vegetative": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 125
+      },
+      "reproductive": {
+        "precision": 1.0,
+        "recall": 0.9978165938864629,
+        "f1": 0.9989071038251366,
+        "support": 458
+      },
+      "maturity": {
+        "precision": 0.75,
+        "recall": 1.0,
+        "f1": 0.8571428571428571,
+        "support": 3
+      }
+    }
+  },
+  "model_file": "growth_stage.keras"
+}

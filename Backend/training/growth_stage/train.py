@@ -105,6 +105,17 @@ def compile_model(tf, model, learning_rate):
     )
 
 
+def balanced_class_weights(rows):
+    """Prevent the largest imported class from overwhelming smaller classes."""
+    counts = Counter(row["stage_label"] for row in rows)
+    total = len(rows)
+    return {
+        CLASSES.index(name): total / (len(CLASSES) * count)
+        for name, count in counts.items()
+        if count
+    }
+
+
 def evaluate(tf, model, dataset):
     actual, predicted, confidences = [], [], []
     for images, labels in dataset:
@@ -147,6 +158,7 @@ def main():
     rows = read_manifest(args.manifest.resolve())
     splits = split_by_plant(rows)
     datasets = {name: make_dataset(tf, records, args.batch_size, name == "train") for name, records in splits.items()}
+    class_weights = balanced_class_weights(splits["train"])
     model, base = build_model(tf)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = args.output_dir / "best.keras"
@@ -155,13 +167,25 @@ def main():
         tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
     ]
     compile_model(tf, model, 1e-3)
-    model.fit(datasets["train"], validation_data=datasets["validation"], epochs=args.head_epochs, callbacks=callbacks)
+    model.fit(
+        datasets["train"],
+        validation_data=datasets["validation"],
+        epochs=args.head_epochs,
+        callbacks=callbacks,
+        class_weight=class_weights,
+    )
 
     base.trainable = True
     for layer in base.layers[:-30]:
         layer.trainable = False
     compile_model(tf, model, 1e-5)
-    model.fit(datasets["train"], validation_data=datasets["validation"], epochs=args.fine_tune_epochs, callbacks=callbacks)
+    model.fit(
+        datasets["train"],
+        validation_data=datasets["validation"],
+        epochs=args.fine_tune_epochs,
+        callbacks=callbacks,
+        class_weight=class_weights,
+    )
 
     best = tf.keras.models.load_model(checkpoint)
     metrics = evaluate(tf, best, datasets["test"])

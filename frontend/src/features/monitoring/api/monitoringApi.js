@@ -1,30 +1,59 @@
 import axios from "axios";
+import { Platform } from "react-native";
 
-import { API_BASE_URL } from "../../../config/api";
+import { API_BASE_URL, API_REQUEST_TIMEOUT_MS } from "../../../config/api";
 
 
 const MONITORING_PREFIX = "/api/monitoring";
 
-export async function analyzeGerminationImage({ imageAsset, plantAgeDays }) {
-  const formData = new FormData();
-  const filename = imageAsset.fileName || `growth-${Date.now()}.jpg`;
+const appendImage = (formData, imageAsset, fallbackName) => {
+  if (!imageAsset?.uri) {
+    throw new Error("A valid image is required.");
+  }
+
+  const filename = imageAsset.fileName || fallbackName;
   const mimeType = imageAsset.mimeType || "image/jpeg";
 
-  formData.append("plant_age_days", String(plantAgeDays));
+  if (Platform.OS === "web" && imageAsset.file) {
+    formData.append("image", imageAsset.file, filename);
+    return;
+  }
+
   formData.append("image", {
     uri: imageAsset.uri,
     name: filename,
     type: mimeType
   });
+};
+
+const uploadConfig = {
+  // Axios supplies the correct multipart boundary on native and web.
+  timeout: API_REQUEST_TIMEOUT_MS
+};
+
+export function getBackendErrorMessage(error, fallback = "Unable to contact the backend.") {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((item) => item?.msg).filter(Boolean).join("; ") || fallback;
+  }
+  if (error?.code === "ECONNABORTED") return "The backend took too long to respond. Please try again.";
+  if (!error?.response && error?.message === "Network Error") {
+    return `Cannot reach the backend at ${API_BASE_URL}. Check that FastAPI is running and the phone is on the same network.`;
+  }
+  return fallback;
+}
+
+export async function analyzeGerminationImage({ imageAsset, plantAgeDays }) {
+  const formData = new FormData();
+
+  formData.append("plant_age_days", String(plantAgeDays));
+  appendImage(formData, imageAsset, `growth-${Date.now()}.jpg`);
 
   const response = await axios.post(
     `${API_BASE_URL}${MONITORING_PREFIX}/analytics/germination/analyze`,
     formData,
-    {
-      headers: {
-        "Content-Type": "multipart/form-data"
-      }
-    }
+    uploadConfig
   );
 
   return response.data;
@@ -32,20 +61,24 @@ export async function analyzeGerminationImage({ imageAsset, plantAgeDays }) {
 
 export async function analyzeGrowthStageImage({ imageAsset }) {
   const formData = new FormData();
-  const filename = imageAsset.fileName || `growth-stage-${Date.now()}.jpg`;
-  const mimeType = imageAsset.mimeType || "image/jpeg";
-
-  formData.append("image", {
-    uri: imageAsset.uri,
-    name: filename,
-    type: mimeType
-  });
+  appendImage(formData, imageAsset, `growth-stage-${Date.now()}.jpg`);
 
   const response = await axios.post(
     `${API_BASE_URL}${MONITORING_PREFIX}/analytics/growth-stage/analyze`,
     formData,
-    { headers: { "Content-Type": "multipart/form-data" } }
+    uploadConfig
   );
+  const data = response.data;
+  if (!data || typeof data.confidence !== "number" || typeof data.probabilities !== "object") {
+    throw new Error("The backend returned an invalid growth-stage response.");
+  }
+  return data;
+}
+
+export async function checkMonitoringHealth() {
+  const response = await axios.get(`${API_BASE_URL}${MONITORING_PREFIX}/health`, {
+    timeout: 10000
+  });
   return response.data;
 }
 
